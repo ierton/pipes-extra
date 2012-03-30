@@ -6,7 +6,11 @@ module Control.Pipe.Coroutine (
   suspendE,
   resume,
   step,
-  terminate
+  terminate,
+  resumeWith,
+  stepWith,
+  resumeBoth,
+  stepBoth
   ) where
 
 import Control.Monad
@@ -61,3 +65,49 @@ terminate p = go (suspendE p (E.toException CoroutineTerminated))
     step (Yield b p) = return p
     step (M m (Finalizer _)) = ensure m
     step (M m s) = liftP s m
+
+
+resumeWith :: (Monad m)
+    => (Maybe a)
+    -> Pipe a b m r
+    -> Pipe x b m (Either (Maybe a,r) (Coroutine a b m r))
+resumeWith ma c = step ma c where
+    step v (Pure r) = return (Left (v,r))
+    step _ (Throw e) = throwP e
+    step v@(Just a) p@(Free c h) = go c where
+        go (Await k) = step Nothing (k a)
+        go (Yield b p) = yield b >> step v p
+        go (M m s) = liftP s m >>= step v
+    step v@Nothing p@(Free c h) = go c where
+        go (Await k) = return (Right (Coroutine p h))
+        go (Yield b p') = yield b >> step v p'
+        go (M m s) = liftP s m >>= step v
+
+stepWith :: (Monad m)
+    => Maybe a
+    -> Coroutine a b m r
+    -> Pipe x b m (Either (Maybe a,r) (Coroutine a b m r))
+stepWith ma = resumeWith ma . suspend
+
+resumeBoth :: (Monad m)
+    => (Maybe a)
+    -> Pipe a b m r
+    -> Pipe x y m (Maybe a, Either r (Maybe b,Coroutine a b m r))
+resumeBoth ma c = step ma c where
+    step v (Pure r) = return (v,Left r)
+    step _ (Throw e) = throwP e
+    step v@(Just a) p@(Free c h) = go c where
+        go (Await k) = step Nothing (k a)
+        go (Yield b p') = return (v,Right (Just b,Coroutine p' h))
+        go (M m s) = liftP s m >>= step v
+    step v@Nothing p@(Free c h) = go c where
+        go (Await k) = return (v,Right (Nothing,Coroutine p h))
+        go (Yield b p') = return (v,Right (Just b,Coroutine p' h))
+        go (M m s) = liftP s m >>= step v
+
+stepBoth :: (Monad m)
+    => Maybe a
+    -> Coroutine a b m r
+    -> Pipe x y m (Maybe a, Either r (Maybe b,Coroutine a b m r))
+stepBoth ma = resumeBoth ma . suspend
+
