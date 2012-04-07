@@ -6,9 +6,11 @@ module Control.Pipe.Coroutine (
   coroutine,
   step,
   terminate,
-  resumeWith,
-  stepWith,
-  resumeBoth,
+  suspendYield,
+  stepYield,
+  suspendAwait,
+  stepAwait,
+  suspendBoth,
   stepBoth
   ) where
 
@@ -48,47 +50,43 @@ terminate :: Monad m
           -> Pipe a b m ()
 terminate p = mapM_ masked (finalizer p)
 
-resumeWith :: (Monad m)
-    => (Maybe a)
-    -> Pipe a b m r
-    -> Pipe x b m (Either (Maybe a,r) (Coroutine a b m r))
-resumeWith ma c = step ma c where
-    step v (Pure r) = return (Left (v,r))
-    step _ (Throw e) = throwP e
-    step v@(Just a) p@(Free c h) = go c where
-        go (Await k) = step Nothing (k a)
-        go (Yield b p) = yield b >> step v p
-        go (M m s) = liftP s m >>= step v
-    step v@Nothing p@(Free c h) = go c where
-        go (Await k) = return (Right (Coroutine p h))
-        go (Yield b p') = yield b >> step v p'
-        go (M m s) = liftP s m >>= step v
-
-stepWith :: (Monad m)
-    => Maybe a
-    -> Coroutine a b m r
-    -> Pipe x b m (Either (Maybe a,r) (Coroutine a b m r))
-stepWith ma = resumeWith ma . suspend
-
-resumeBoth :: (Monad m)
+suspendBoth :: (Monad m)
     => (Maybe a)
     -> Pipe a b m r
     -> Pipe x y m (Maybe a, Either r (Maybe b,Coroutine a b m r))
-resumeBoth ma c = step ma c where
-    step v (Pure r) = return (v,Left r)
-    step _ (Throw e) = throwP e
-    step v@(Just a) p@(Free c h) = go c where
-        go (Await k) = step Nothing (k a)
-        go (Yield b p') = return (v,Right (Just b,Coroutine p' h))
-        go (M m s) = liftP s m >>= step v
-    step v@Nothing p@(Free c h) = go c where
-        go (Await k) = return (v,Right (Nothing,Coroutine p h))
-        go (Yield b p') = return (v,Right (Just b,Coroutine p' h))
-        go (M m s) = liftP s m >>= step v
+suspendBoth v (Pure r w) = Pure (v, Left r) w
+suspendBoth _ (Throw e w) = Throw e w
+suspendBoth v (Yield x p w) = return (v, Right (Just x, Coroutine p w))
+suspendBoth v (M s m h) = M s (liftM (suspendBoth v) m) (suspendBoth v . h)
+suspendBoth (Just a) (Await k h) = suspendBoth Nothing (catchP (k a) h)
+suspendBoth Nothing p@(Await k h) = return (Nothing, Right (Nothing,coroutine p))
 
 stepBoth :: (Monad m)
     => Maybe a
     -> Coroutine a b m r
     -> Pipe x y m (Maybe a, Either r (Maybe b,Coroutine a b m r))
-stepBoth ma = resumeBoth ma . suspend
+stepBoth ma = suspendBoth ma . resume
+
+suspendYield :: Monad m
+        => Pipe a b m r
+        -> Pipe a x m (Either r (b, Coroutine a b m r))
+suspendYield = suspend
+
+stepYield :: Monad m
+     => Coroutine a b m r
+     -> Pipe a x m (Either r (b, Coroutine a b m r))
+stepYield = step
+
+suspendAwait :: (Monad m)
+    => Maybe a
+    -> Pipe a b m r
+    -> Pipe x b m (Maybe a, Either r (Coroutine a b m r))
+suspendAwait a p = suspendBoth a p >>= unSuspend where
+    unSuspend (a, Left r) = return (a, Left r)
+    unSuspend (a, Right (Just b, cr)) = yield b >> suspendAwait a (resume cr) 
+    unSuspend (a, Right (Nothing, cr)) = return (a, Right cr)
+
+stepAwait a = suspendAwait a . resume 
+
+
 
